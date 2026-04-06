@@ -2,6 +2,7 @@
 description: Clone a repo into ~/code/github/<owner>/<repo>, inspect it, and recommend the best next step
 ---
 Clone and evaluate the repository at $1.
+If additional arguments are provided beyond the URL, treat `${@:2}` as the evaluation focus and prioritize findings relevant to that focus.
 
 Use this repository location convention:
 
@@ -32,6 +33,7 @@ Procedure:
    - apparent maturity/maintenance status
    - how relevant it is to my pi workflow
    - risks, caveats, or signs of staleness
+   - if this is a catalog, awesome list, or index repo, extract the most relevant entries for my workflow
 8. Finally recommend the most useful next actions:
    - give 3–5 ranked suggestions
    - clearly identify the single highest-leverage thing to do next
