@@ -1,3 +1,19 @@
 node_modules/
 dist/
 .wrangler/
+
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+secrets/
+credentials/
+
+# System
+.DS_Store
+.aws/
+.ssh/
