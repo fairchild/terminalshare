@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>terminalshare</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: #0d1117; color: #e6edf3; font-family: system-ui, sans-serif; }
+    #toolbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 16px; background: #161b22; border-bottom: 1px solid #30363d;
+      font-size: 13px; color: #8b949e;
+    }
+    #toolbar .name { color: #58a6ff; font-weight: 600; }
+    #toolbar .status { display: flex; align-items: center; gap: 6px; }
+    #toolbar .dot { width: 8px; height: 8px; border-radius: 50%; }
+    #toolbar .dot.connected { background: #3fb950; }
+    #toolbar .dot.disconnected { background: #f85149; }
+    #terminal-container {
+      height: calc(100% - 41px); width: 100%;
+    }
+    #loading {
+      display: flex; align-items: center; justify-content: center;
+      height: 100%; color: #8b949e; font-size: 15px;
+    }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <span class="name" id="tree-name">terminalshare</span>
+    <span class="status">
+      <span class="dot disconnected" id="status-dot"></span>
+      <span id="status-text">connecting...</span>
+    </span>
+  </div>
+  <div id="terminal-container">
+    <div id="loading">loading terminal...</div>
+  </div>
+
+  <script type="module">
+    // Extract tree ID from URL: /trees/:id/view
+    const pathParts = window.location.pathname.split("/");
+    const treeIdx = pathParts.indexOf("trees");
+    const treeId = treeIdx >= 0 ? pathParts[treeIdx + 1] : null;
+
+    if (!treeId) {
+      document.getElementById("loading").textContent = "no tree ID in URL";
+      throw new Error("no tree ID");
+    }
+
+    // Fetch tree info
+    const info = await fetch(`/trees/${treeId}`).then(r => r.json());
+    document.getElementById("tree-name").textContent = info.name || treeId;
+    document.title = `${info.name || treeId} — terminalshare`;
+
+    // Load ghostty-web from esm.sh
+    const { init, Terminal, FitAddon } = await import("https://esm.sh/ghostty-web@latest");
+
+    await init();
+
+    const container = document.getElementById("terminal-container");
+    container.innerHTML = "";
+
+    const term = new Terminal({
+      fontSize: 14,
+      fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Monaco, monospace",
+      scrollback: 10000,
+    });
+
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(container);
+    fitAddon.observeResize();
+
+    // Connect WebSocket
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/trees/${treeId}/ws`;
+    let ws;
+    let reconnectTimer;
+
+    function setStatus(connected) {
+      const dot = document.getElementById("status-dot");
+      const text = document.getElementById("status-text");
+      dot.className = `dot ${connected ? "connected" : "disconnected"}`;
+      text.textContent = connected ? "live" : "disconnected";
+    }
+
+    function connect() {
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        setStatus(true);
+        clearTimeout(reconnectTimer);
+        // Send initial size
+        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+      };
+
+      ws.onmessage = (event) => {
+        // Control messages from DO start with {
+        if (typeof event.data === "string" && event.data.startsWith("{")) {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.control === "header") return; // Already fetched via REST
+          } catch { /* not JSON, treat as terminal data */ }
+        }
+        term.write(event.data);
+      };
+
+      ws.onclose = () => {
+        setStatus(false);
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+    }
+
+    // Send user input to WebSocket
+    term.onData((data) => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(data);
+      }
+    });
+
+    // Send resize events
+    term.onResize(({ cols, rows }) => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      }
+    });
+
+    connect();
+  </script>
+</body>
+</html>

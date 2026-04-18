@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>terminalshare</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Monaco, monospace;
+    }
+
+    .page {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 80px 24px;
+    }
+
+    h1 {
+      font-size: 32px;
+      font-weight: 700;
+      color: #e6edf3;
+      margin-bottom: 8px;
+      letter-spacing: -0.5px;
+    }
+
+    .tagline {
+      font-size: 16px;
+      color: #8b949e;
+      margin-bottom: 48px;
+      line-height: 1.5;
+    }
+
+    .terminal-demo {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 48px;
+    }
+
+    .terminal-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      background: #1c2128;
+      border-bottom: 1px solid #30363d;
+    }
+
+    .terminal-dot {
+      width: 12px; height: 12px;
+      border-radius: 50%;
+    }
+    .terminal-dot.r { background: #f85149; }
+    .terminal-dot.y { background: #d29922; }
+    .terminal-dot.g { background: #3fb950; }
+
+    .terminal-bar .title {
+      flex: 1;
+      text-align: center;
+      font-size: 12px;
+      color: #8b949e;
+    }
+
+    .terminal-body {
+      padding: 20px;
+      font-size: 14px;
+      line-height: 1.6;
+      color: #8b949e;
+      min-height: 200px;
+    }
+
+    .terminal-body .prompt { color: #3fb950; }
+    .terminal-body .cmd { color: #e6edf3; }
+    .terminal-body .out { color: #8b949e; }
+    .terminal-body .url { color: #58a6ff; }
+    .terminal-body .dim { color: #484f58; }
+
+    .terminal-body .line {
+      display: block;
+      margin-bottom: 2px;
+    }
+
+    .tree-viz {
+      margin: 12px 0;
+      color: #58a6ff;
+    }
+    .tree-viz .branch { color: #d29922; }
+    .tree-viz .label { color: #3fb950; }
+    .tree-viz .node { color: #8b949e; }
+
+    .features {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-bottom: 48px;
+    }
+
+    @media (max-width: 540px) {
+      .features { grid-template-columns: 1fr; }
+    }
+
+    .feature {
+      padding: 20px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+    }
+
+    .feature h3 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #e6edf3;
+      margin-bottom: 6px;
+    }
+
+    .feature p {
+      font-size: 13px;
+      color: #8b949e;
+      line-height: 1.5;
+    }
+
+    .api-section {
+      margin-bottom: 48px;
+    }
+
+    .api-section h2 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #e6edf3;
+      margin-bottom: 16px;
+    }
+
+    .endpoint {
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+      padding: 8px 0;
+      border-bottom: 1px solid #21262d;
+      font-size: 13px;
+    }
+
+    .endpoint:last-child { border-bottom: none; }
+
+    .method {
+      font-weight: 600;
+      min-width: 48px;
+    }
+    .method.get { color: #3fb950; }
+    .method.post { color: #d29922; }
+    .method.ws { color: #a371f7; }
+
+    .path { color: #e6edf3; }
+    .desc { color: #8b949e; margin-left: auto; }
+
+    footer {
+      padding-top: 32px;
+      border-top: 1px solid #21262d;
+      font-size: 12px;
+      color: #484f58;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>terminalshare</h1>
+    <p class="tagline">
+      Persist and share terminal sessions as trees.<br>
+      Branch, label, replay. Every keystroke preserved.
+    </p>
+
+    <div class="terminal-demo">
+      <div class="terminal-bar">
+        <span class="terminal-dot r"></span>
+        <span class="terminal-dot y"></span>
+        <span class="terminal-dot g"></span>
+        <span class="title">session tree</span>
+      </div>
+      <div class="terminal-body">
+        <span class="line"><span class="prompt">$</span> <span class="cmd">curl -X POST /trees</span></span>
+        <span class="line"><span class="out">{ "treeId": "a1b2c3d4" }</span></span>
+        <span class="line">&nbsp;</span>
+        <div class="tree-viz">
+<span class="line"><span class="node">root</span></span>
+<span class="line"><span class="dim">  |</span></span>
+<span class="line"><span class="dim">  +--</span> <span class="node">setup</span> <span class="label">[init]</span></span>
+<span class="line"><span class="dim">  |</span></span>
+<span class="line"><span class="dim">  +--</span> <span class="node">debugging</span></span>
+<span class="line"><span class="dim">  |    |</span></span>
+<span class="line"><span class="dim">  |    +--</span> <span class="branch">branch: "try fix A"</span></span>
+<span class="line"><span class="dim">  |    |</span></span>
+<span class="line"><span class="dim">  |    +--</span> <span class="branch">branch: "try fix B"</span> <span class="label">[working]</span></span>
+<span class="line"><span class="dim">  |</span></span>
+<span class="line"><span class="dim">  +--</span> <span class="node">deploy</span> <span class="dim">&lt;live&gt;</span></span>
+        </div>
+        <span class="line">&nbsp;</span>
+        <span class="line"><span class="prompt">$</span> <span class="cmd">open /trees/a1b2c3d4/view</span></span>
+        <span class="line"><span class="url">https://terminalshare.com/trees/a1b2c3d4/view</span></span>
+      </div>
+    </div>
+
+    <div class="features">
+      <div class="feature">
+        <h3>Append-only trees</h3>
+        <p>Every terminal event is an entry in a tree. Fork at any point to explore different paths.</p>
+      </div>
+      <div class="feature">
+        <h3>Live sharing</h3>
+        <p>Viewers connect via WebSocket and see the terminal in real time through ghostty-web.</p>
+      </div>
+      <div class="feature">
+        <h3>Branching</h3>
+        <p>Move the leaf pointer to branch. Try something, rewind, try something else.</p>
+      </div>
+      <div class="feature">
+        <h3>Replay</h3>
+        <p>Walk any path from root to leaf. Snapshots let you jump to any point without full replay.</p>
+      </div>
+    </div>
+
+    <div class="api-section">
+      <h2>API</h2>
+      <div class="endpoint">
+        <span class="method post">POST</span>
+        <span class="path">/trees</span>
+        <span class="desc">create a tree</span>
+      </div>
+      <div class="endpoint">
+        <span class="method get">GET</span>
+        <span class="path">/trees/:id</span>
+        <span class="desc">tree info</span>
+      </div>
+      <div class="endpoint">
+        <span class="method get">GET</span>
+        <span class="path">/trees/:id/tree</span>
+        <span class="desc">full structure</span>
+      </div>
+      <div class="endpoint">
+        <span class="method get">GET</span>
+        <span class="path">/trees/:id/replay/:nodeId</span>
+        <span class="desc">replay to a node</span>
+      </div>
+      <div class="endpoint">
+        <span class="method post">POST</span>
+        <span class="path">/trees/:id/branch</span>
+        <span class="desc">branch from a point</span>
+      </div>
+      <div class="endpoint">
+        <span class="method post">POST</span>
+        <span class="path">/trees/:id/label</span>
+        <span class="desc">add a bookmark</span>
+      </div>
+      <div class="endpoint">
+        <span class="method ws">WS</span>
+        <span class="path">/trees/:id/ws</span>
+        <span class="desc">viewer websocket</span>
+      </div>
+      <div class="endpoint">
+        <span class="method ws">WS</span>
+        <span class="path">/trees/:id/ws/sandbox</span>
+        <span class="desc">sandbox websocket</span>
+      </div>
+    </div>
+
+    <footer>
+      terminalshare.com
+    </footer>
+  </div>
+</body>
+</html>

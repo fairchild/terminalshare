@@ -1,0 +1,77 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "terminalshare",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TERMINAL_TREE",
+        "class_name": "TerminalTreeDO"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1-terminal-tree-sqlite",
+      "new_sqlite_classes": ["TerminalTreeDO"]
+    }
+  ],
+
+  "routes": [
+    {
+      "pattern": "terminalshare.com",
+      "custom_domain": true
+    },
+    {
+      "pattern": "www.terminalshare.com",
+      "custom_domain": true
+    },
+    {
+      "pattern": "terminalshare.com/*",
+      "zone_name": "terminalshare.com"
+    },
+    {
+      "pattern": "www.terminalshare.com/*",
+      "zone_name": "terminalshare.com"
+    }
+  ],
+
+  "vars": {
+    "ENVIRONMENT": "development"
+  },
+
+  "env": {
+    "preview": {
+      "name": "terminalshare-preview",
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "TERMINAL_TREE",
+            "class_name": "TerminalTreeDO"
+          }
+        ]
+      },
+      "vars": {
+        "ENVIRONMENT": "preview"
+      }
+    },
+    "production": {
+      "name": "terminalshare",
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "TERMINAL_TREE",
+            "class_name": "TerminalTreeDO"
+          }
+        ]
+      },
+      "vars": {
+        "ENVIRONMENT": "production"
+      }
+    }
+  }
+}
