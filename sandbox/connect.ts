@@ -24,7 +24,7 @@ const TOKEN = process.env.TERMINALSHARE_TOKEN;
 async function main() {
   if (!TOKEN) {
     console.error(
-      "TERMINALSHARE_TOKEN is not set. Source ~/.config/cloudcompute/terminalshare.env first."
+      "TERMINALSHARE_TOKEN is not set. Source ~/.config/cloudcompute/terminalshare.env first (it must contain `export TERMINALSHARE_TOKEN=…`, not a bare assignment)."
     );
     process.exit(1);
   }
