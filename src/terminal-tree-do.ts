@@ -5,23 +5,33 @@ import type { TreeHeader, ViewerInfo } from "./tree/types.ts";
 /** How many data entries between automatic snapshots */
 const SNAPSHOT_INTERVAL = 500;
 
+const WS_OPEN = 1;
+
 interface WebSocketAttachment {
   id: string;
   role: "viewer" | "sandbox";
   connectedAt: string;
+  /** Viewers are read-only unless they presented the sandbox token. */
+  canWrite: boolean;
 }
 
 export class TerminalTreeDO extends DurableObject {
   private tree: SessionTree;
-  private sandboxSocket: WebSocket | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.tree = new SessionTree(ctx.storage.sql);
-    // Restore any hibernated WebSockets
-    for (const ws of ctx.getWebSockets("sandbox")) {
-      this.sandboxSocket = ws;
+  }
+
+  /**
+   * The attached sandbox, read from the socket tags rather than a field so it
+   * survives hibernation and stays true after an eviction.
+   */
+  private get sandbox(): WebSocket | null {
+    for (const ws of this.ctx.getWebSockets("sandbox")) {
+      if (ws.readyState === WS_OPEN) return ws;
     }
+    return null;
   }
 
   // --- HTTP dispatch ---
@@ -76,30 +86,41 @@ export class TerminalTreeDO extends DurableObject {
 
   // --- WebSocket: sandbox connection ---
 
-  private handleSandboxUpgrade(request: Request): Response {
+  private handleSandboxUpgrade(_request: Request): Response {
+    if (this.sandbox) {
+      return new Response("sandbox already attached", { status: 409 });
+    }
+
     const [client, server] = Object.values(new WebSocketPair());
     const attachment: WebSocketAttachment = {
       id: generateId(),
       role: "sandbox",
       connectedAt: new Date().toISOString(),
+      canWrite: true,
     };
     this.ctx.acceptWebSocket(server, ["sandbox"]);
     server.serializeAttachment(attachment);
-    this.sandboxSocket = server;
     return new Response(null, { status: 101, webSocket: client });
   }
 
   // --- WebSocket: viewer connection ---
 
   private handleViewerUpgrade(request: Request): Response {
+    const url = new URL(request.url);
+    const canWrite = url.searchParams.get("write") === "1";
+    const subprotocol = url.searchParams.get("protocol");
+
     const [client, server] = Object.values(new WebSocketPair());
     const attachment: WebSocketAttachment = {
       id: generateId(),
       role: "viewer",
       connectedAt: new Date().toISOString(),
+      canWrite,
     };
     this.ctx.acceptWebSocket(server, ["viewer"]);
     server.serializeAttachment(attachment);
+
+    server.send(JSON.stringify({ control: "access", write: canWrite }));
 
     // Send current tree info on connect
     const header = this.tree.getHeader();
@@ -107,7 +128,13 @@ export class TerminalTreeDO extends DurableObject {
       server.send(JSON.stringify({ control: "header", ...header }));
     }
 
-    return new Response(null, { status: 101, webSocket: client });
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+      // A browser aborts the handshake unless the server echoes a subprotocol
+      // it offered, so echo the carrier whether or not the token was good.
+      headers: subprotocol ? { "Sec-WebSocket-Protocol": subprotocol } : undefined,
+    });
   }
 
   // --- WebSocket message handling (hibernation-compatible) ---
@@ -119,21 +146,7 @@ export class TerminalTreeDO extends DurableObject {
     if (attachment.role === "sandbox") {
       this.handleSandboxMessage(raw);
     } else {
-      this.handleViewerMessage(ws, raw);
-    }
-  }
-
-  async webSocketClose(ws: WebSocket) {
-    const attachment = ws.deserializeAttachment() as WebSocketAttachment;
-    if (attachment.role === "sandbox") {
-      this.sandboxSocket = null;
-    }
-  }
-
-  async webSocketError(ws: WebSocket) {
-    const attachment = ws.deserializeAttachment() as WebSocketAttachment;
-    if (attachment.role === "sandbox") {
-      this.sandboxSocket = null;
+      this.handleViewerMessage(attachment, raw);
     }
   }
 
@@ -154,15 +167,22 @@ export class TerminalTreeDO extends DurableObject {
     this.maybeSnapshot();
   }
 
-  /** Input from a viewer (keystrokes) */
-  private handleViewerMessage(_ws: WebSocket, raw: string) {
+  /**
+   * Input from a viewer (keystrokes, resize). A viewer that did not present
+   * the sandbox token is read-only: its messages are dropped here, so they
+   * reach neither the PTY nor the tree. Resize counts as a write — it changes
+   * the terminal every other viewer sees.
+   */
+  private handleViewerMessage(attachment: WebSocketAttachment, raw: string) {
+    if (!attachment.canWrite) return;
+
     // Check for control messages (JSON)
     try {
       const msg = JSON.parse(raw);
       if (msg.type === "resize") {
         this.tree.append({ type: "resize", cols: msg.cols, rows: msg.rows });
         // Forward resize to sandbox
-        this.sandboxSocket?.send(raw);
+        this.sandbox?.send(raw);
         return;
       }
     } catch {
@@ -177,7 +197,7 @@ export class TerminalTreeDO extends DurableObject {
     });
 
     // Forward to sandbox
-    this.sandboxSocket?.send(raw);
+    this.sandbox?.send(raw);
   }
 
   private maybeSnapshot() {
@@ -196,7 +216,12 @@ export class TerminalTreeDO extends DurableObject {
 
     const viewers: ViewerInfo[] = this.ctx.getWebSockets("viewer").map((ws) => {
       const att = ws.deserializeAttachment() as WebSocketAttachment;
-      return { id: att.id, connectedAt: att.connectedAt, mode: "live" };
+      return {
+        id: att.id,
+        connectedAt: att.connectedAt,
+        mode: "live",
+        write: att.canWrite === true,
+      };
     });
 
     return Response.json({
@@ -204,7 +229,7 @@ export class TerminalTreeDO extends DurableObject {
       entryCount: this.tree.entryCount(),
       leafId: this.tree.leafId,
       viewers,
-      sandboxConnected: this.sandboxSocket !== null,
+      sandboxConnected: this.sandbox !== null,
     });
   }
 

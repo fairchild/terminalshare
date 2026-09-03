@@ -2,10 +2,14 @@
  * Sandbox connector: spawns a local PTY and bridges it to a terminalshare tree.
  *
  * Usage:
- *   node --experimental-strip-types connect.ts [base-url]
+ *   TERMINALSHARE_TOKEN=... node --experimental-strip-types connect.ts [base-url]
  *
  * Creates a tree, spawns a shell, connects the PTY as the sandbox WebSocket.
  * Prints the viewer URL so you can open it in a browser.
+ *
+ * Both write operations need the bearer token the Worker holds as the
+ * `SANDBOX_TOKEN` secret. Keep it in `~/.config/cloudcompute/terminalshare.env`
+ * and source that file rather than putting it on the command line.
  */
 
 import * as pty from "@lydell/node-pty";
@@ -15,12 +19,22 @@ const BASE_URL = process.argv[2] || "http://localhost:8788";
 const SHELL = process.env.SHELL || "bash";
 const COLS = parseInt(process.env.COLS || "120");
 const ROWS = parseInt(process.env.ROWS || "30");
+const TOKEN = process.env.TERMINALSHARE_TOKEN;
 
 async function main() {
+  if (!TOKEN) {
+    console.error(
+      "TERMINALSHARE_TOKEN is not set. Source ~/.config/cloudcompute/terminalshare.env first."
+    );
+    process.exit(1);
+  }
+
+  const auth = { Authorization: `Bearer ${TOKEN}` };
+
   // 1. Create a tree
   const res = await fetch(`${BASE_URL}/trees`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...auth },
     body: JSON.stringify({
       sandboxUrl: "local",
       cols: COLS,
@@ -30,7 +44,8 @@ async function main() {
   });
 
   if (!res.ok) {
-    console.error("Failed to create tree:", await res.text());
+    const detail = res.status === 401 ? " (bad TERMINALSHARE_TOKEN)" : "";
+    console.error(`Failed to create tree [${res.status}]${detail}:`, await res.text());
     process.exit(1);
   }
 
@@ -54,8 +69,24 @@ async function main() {
 
   console.log(`Shell spawned: ${SHELL} (pid ${shell.pid})`);
 
-  // 3. Connect to terminalshare as sandbox
-  const ws = new WebSocket(`${wsBase}/trees/${treeId}/ws/sandbox`);
+  // 3. Connect to terminalshare as sandbox. Node can set request headers on
+  //    the handshake, so the token never touches the URL.
+  const ws = new WebSocket(`${wsBase}/trees/${treeId}/ws/sandbox`, {
+    headers: auth,
+  });
+
+  ws.on("unexpected-response", (_req: unknown, response: { statusCode?: number }) => {
+    const status = response.statusCode;
+    const detail =
+      status === 401
+        ? "bad TERMINALSHARE_TOKEN"
+        : status === 409
+          ? "another sandbox is already attached to this tree"
+          : "handshake rejected";
+    console.error(`Sandbox WebSocket refused [${status}]: ${detail}`);
+    shell.kill();
+    process.exit(1);
+  });
 
   ws.on("open", () => {
     console.log("Connected to terminalshare as sandbox");

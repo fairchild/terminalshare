@@ -54,8 +54,8 @@
     document.getElementById("tree-name").textContent = info.name || treeId;
     document.title = `${info.name || treeId} — terminalshare`;
 
-    // Load ghostty-web from esm.sh
-    const { init, Terminal, FitAddon } = await import("https://esm.sh/ghostty-web@latest");
+    // Load ghostty-web from esm.sh, pinned — keep in sync with GHOSTTY_WEB in src/index.ts
+    const { init, Terminal, FitAddon } = await import("https://esm.sh/ghostty-web@0.4.0");
 
     await init();
 
@@ -78,22 +78,32 @@
     const wsUrl = `${protocol}//${window.location.host}/trees/${treeId}/ws`;
     let ws;
     let reconnectTimer;
+    let canWrite = false;
+
+    // A write token rides in the URL fragment (never sent to the server, so it
+    // stays out of request logs) and is handed to the socket as a subprotocol.
+    // ?token= also works, at the cost of landing in logs.
+    const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const rawToken = fragment.get("token") || new URLSearchParams(window.location.search).get("token");
+    const subprotocols = rawToken
+      ? ["ts-token." + btoa(rawToken).split("+").join("-").split("/").join("_").split("=").join("")]
+      : [];
 
     function setStatus(connected) {
       const dot = document.getElementById("status-dot");
       const text = document.getElementById("status-text");
       dot.className = `dot ${connected ? "connected" : "disconnected"}`;
-      text.textContent = connected ? "live" : "disconnected";
+      text.textContent = connected ? (canWrite ? "live" : "live · read-only") : "disconnected";
     }
 
     function connect() {
-      ws = new WebSocket(wsUrl);
+      ws = subprotocols.length ? new WebSocket(wsUrl, subprotocols) : new WebSocket(wsUrl);
 
       ws.onopen = () => {
         setStatus(true);
         clearTimeout(reconnectTimer);
-        // Send initial size
-        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        // Send initial size — only a writer may resize the shared PTY
+        if (canWrite) ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
       };
 
       ws.onmessage = (event) => {
@@ -101,6 +111,12 @@
         if (typeof event.data === "string" && event.data.startsWith("{")) {
           try {
             const msg = JSON.parse(event.data);
+            if (msg.control === "access") {
+              canWrite = msg.write === true;
+              setStatus(true);
+              if (canWrite) ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+              return;
+            }
             if (msg.control === "header") return; // Already fetched via REST
           } catch { /* not JSON, treat as terminal data */ }
         }
@@ -117,16 +133,16 @@
       };
     }
 
-    // Send user input to WebSocket
+    // Send user input to WebSocket — read-only viewers never send
     term.onData((data) => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      if (canWrite && ws && ws.readyState === WebSocket.OPEN) {
         ws.send(data);
       }
     });
 
     // Send resize events
     term.onResize(({ cols, rows }) => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      if (canWrite && ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "resize", cols, rows }));
       }
     });

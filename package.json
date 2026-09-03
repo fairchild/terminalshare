@@ -6,7 +6,8 @@
     "dev": "wrangler dev",
     "check": "tsc",
     "deploy:preview": "wrangler deploy --env preview",
-    "deploy:production": "wrangler deploy --env production"
+    "deploy:production": "wrangler deploy --env production",
+    "test": "node --test test/*.test.ts"
   },
   "dependencies": {
     "hono": "^4.11.3"
@@ -14,6 +15,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20251231.0",
     "typescript": "^5.9.3",
-    "wrangler": "^4.50.0"
+    "wrangler": "^4.50.0",
+    "ws": "^8.18.0"
   }
 }

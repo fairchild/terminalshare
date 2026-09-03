@@ -115,4 +115,6 @@ export interface ViewerInfo {
   /** "live" = watching leaf, "replay" = viewing specific node */
   mode: "live" | "replay";
   nodeId?: EntryId;
+  /** Whether this viewer's input reaches the PTY. False unless it authenticated. */
+  write: boolean;
 }

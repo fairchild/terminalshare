@@ -1,7 +1,16 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import {
+  authorize,
+  bearerToken,
+  socketToken,
+  tokenSubprotocol,
+} from "./auth.ts";
 
 export { TerminalTreeDO } from "./terminal-tree-do.ts";
+
+/** Pinned so a compromised or breaking upstream release cannot reach viewers. */
+const GHOSTTY_WEB = "https://esm.sh/ghostty-web@0.4.0";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -15,7 +24,7 @@ app.get("/", async (c) => {
       status: "ok",
       environment: c.env.ENVIRONMENT,
       endpoints: {
-        createTree: "POST /trees",
+        createTree: "POST /trees (bearer)",
         treeInfo: "GET /trees/:id",
         treeStructure: "GET /trees/:id/tree",
         node: "GET /trees/:id/node/:nodeId",
@@ -23,7 +32,7 @@ app.get("/", async (c) => {
         branch: "POST /trees/:id/branch",
         label: "POST /trees/:id/label",
         viewerWebSocket: "GET /trees/:id/ws",
-        sandboxWebSocket: "GET /trees/:id/ws/sandbox",
+        sandboxWebSocket: "GET /trees/:id/ws/sandbox (bearer)",
       },
     });
   }
@@ -34,10 +43,35 @@ app.get("/healthz", (c) => {
   return c.json({ status: "ok", environment: c.env.ENVIRONMENT });
 });
 
+// --- Write gate ---
+
+/**
+ * Returns a rejection Response when the caller may not write, or null when it
+ * may. An unset `SANDBOX_TOKEN` fails closed with 503 rather than 401 so a
+ * misconfigured deploy is distinguishable from a bad credential.
+ */
+async function requireToken(
+  env: Env,
+  presented: string | null
+): Promise<Response | null> {
+  const outcome = await authorize(env.SANDBOX_TOKEN, presented);
+  if (outcome === "ok") return null;
+  if (outcome === "unconfigured") {
+    return Response.json({ error: "sandbox token not configured" }, { status: 503 });
+  }
+  return Response.json(
+    { error: "unauthorized" },
+    { status: 401, headers: { "WWW-Authenticate": 'Bearer realm="terminalshare"' } }
+  );
+}
+
 // --- Tree lifecycle ---
 
-/** Create a new terminal tree */
+/** Create a new terminal tree. Requires the sandbox bearer token. */
 app.post("/trees", async (c) => {
+  const denied = await requireToken(c.env, bearerToken(c.req.raw));
+  if (denied) return denied;
+
   const body = await c.req.json<{
     sandboxUrl: string;
     cols?: number;
@@ -135,16 +169,30 @@ app.get("/trees/:id/view", async (c) => {
 
 // --- WebSocket upgrades ---
 
-/** Viewer connects to watch/interact with the terminal */
+/**
+ * Viewer connects to watch the terminal. Read-only unless it presents the
+ * sandbox token; an anonymous viewer still connects, it just cannot type.
+ */
 app.get("/trees/:id/ws", async (c) => {
+  const presented = socketToken(c.req.raw);
+  const write =
+    (await authorize(c.env.SANDBOX_TOKEN, presented)) === "ok";
+
+  const params = new URLSearchParams({ write: write ? "1" : "0" });
+  const offered = tokenSubprotocol(c.req.raw);
+  if (offered) params.set("protocol", offered);
+
   const stub = getStub(c);
-  return stub.fetch(new Request("http://do/ws/view", {
+  return stub.fetch(new Request(`http://do/ws/view?${params}`, {
     headers: c.req.raw.headers,
   }));
 });
 
-/** Sandbox connects to relay its PTY */
+/** Sandbox connects to relay its PTY. Requires the bearer; one at a time. */
 app.get("/trees/:id/ws/sandbox", async (c) => {
+  const denied = await requireToken(c.env, socketToken(c.req.raw));
+  if (denied) return denied;
+
   const stub = getStub(c);
   return stub.fetch(new Request("http://do/ws/sandbox", {
     headers: c.req.raw.headers,
@@ -382,7 +430,7 @@ const VIEWER_HTML = `<!DOCTYPE html>
     document.getElementById("tree-name").textContent = info.name || treeId;
     document.title = (info.name || treeId) + " — terminalshare";
 
-    const { init, Terminal, FitAddon } = await import("https://esm.sh/ghostty-web@latest");
+    const { init, Terminal, FitAddon } = await import("${GHOSTTY_WEB}");
     await init();
 
     const container = document.getElementById("terminal-container");
@@ -400,23 +448,43 @@ const VIEWER_HTML = `<!DOCTYPE html>
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = protocol + "//" + window.location.host + "/trees/" + treeId + "/ws";
-    let ws, reconnectTimer;
+
+    // A write token rides in the URL fragment (never sent to the server, so it
+    // stays out of request logs) and is handed to the socket as a subprotocol.
+    // ?token= also works, at the cost of landing in logs.
+    const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const rawToken = fragment.get("token") || new URLSearchParams(window.location.search).get("token");
+    const subprotocols = rawToken
+      ? ["ts-token." + btoa(rawToken).split("+").join("-").split("/").join("_").split("=").join("")]
+      : [];
+
+    let ws, reconnectTimer, canWrite = false;
 
     function setStatus(connected) {
       document.getElementById("status-dot").className = "dot " + (connected ? "connected" : "disconnected");
-      document.getElementById("status-text").textContent = connected ? "live" : "disconnected";
+      document.getElementById("status-text").textContent =
+        connected ? (canWrite ? "live" : "live · read-only") : "disconnected";
     }
 
     function connect() {
-      ws = new WebSocket(wsUrl);
+      ws = subprotocols.length ? new WebSocket(wsUrl, subprotocols) : new WebSocket(wsUrl);
       ws.onopen = () => {
         setStatus(true);
         clearTimeout(reconnectTimer);
-        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        if (canWrite) ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
       };
       ws.onmessage = (event) => {
         if (typeof event.data === "string" && event.data.startsWith("{")) {
-          try { if (JSON.parse(event.data).control === "header") return; } catch {}
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.control === "access") {
+              canWrite = msg.write === true;
+              setStatus(true);
+              if (canWrite) ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+              return;
+            }
+            if (msg.control === "header") return;
+          } catch {}
         }
         term.write(event.data);
       };
@@ -424,9 +492,11 @@ const VIEWER_HTML = `<!DOCTYPE html>
       ws.onerror = () => { ws.close(); };
     }
 
-    term.onData((data) => { if (ws?.readyState === WebSocket.OPEN) ws.send(data); });
+    term.onData((data) => {
+      if (canWrite && ws?.readyState === WebSocket.OPEN) ws.send(data);
+    });
     term.onResize(({ cols, rows }) => {
-      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      if (canWrite && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows }));
     });
     connect();
   </script>

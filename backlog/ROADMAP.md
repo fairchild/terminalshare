@@ -4,7 +4,9 @@
 
 The core is working: append-only tree model, Durable Object with SQLite storage, WebSocket fanout (sandbox to viewers), REST API (8 endpoints), and a ghostty-web viewer for live terminal watching. Sandbox connector bridges a local PTY to the Worker.
 
-What's missing: snapshot capture is stubbed (TODO at `terminal-tree-do.ts:186`), no UI for branching/replay/labels, no auth, no tree discovery.
+Writes are gated: a `SANDBOX_TOKEN` bearer is required to create a tree or attach a sandbox, only one sandbox may attach at a time, and viewers are read-only unless they present the same token. Reads stay gated by the tree UUID.
+
+What's missing: snapshot capture is stubbed (TODO in `terminal-tree-do.ts`), no UI for branching/replay/labels, no tree discovery. **The nearest gap is lifecycle** — a tree lives forever and there is no way to delete one, so a token holder who creates trees is creating permanent storage. TTL and delete are the next auth-adjacent work (Phase 4).
 
 ---
 
@@ -13,7 +15,7 @@ What's missing: snapshot capture is stubbed (TODO at `terminal-tree-do.ts:186`),
 Get the basics solid before building features on top.
 
 - [ ] **Snapshot capture protocol** — define control message from DO to sandbox requesting buffer state; sandbox responds with screen buffer; DO stores as SnapshotEntry. Unblocks replay and fast seek.
-- [ ] **Auth** — gate tree creation and sandbox connections. Viewers can be public or token-gated. Integrate with Better Auth via services/home or use simple bearer tokens.
+- [x] **Auth** — `SANDBOX_TOKEN` bearer on `POST /trees` and the sandbox WebSocket upgrade (401 on miss, constant-time compare, 503 if the secret is unset). Second sandbox attach gets 409 instead of evicting the first. Viewers connect anonymously and read-only; the same token upgrades them to write, carried as `Authorization`, a `ts-token.` subprotocol, or `?token=`. Reads stay link-gated by the tree UUID. See README, "Auth".
 - [ ] **Error handling** — handle sandbox-not-connected gracefully in viewer (show "waiting for terminal..." instead of blank screen). Handle tree-not-found on viewer page with a proper error UI.
 - [ ] **Serve static files from public/** — move LANDING_HTML and VIEWER_HTML out of index.ts into public/ served via Workers static assets instead of inline template strings.
 
@@ -32,7 +34,7 @@ Make it useful for others to find and watch sessions.
 
 - [ ] **Tree listing** — index page showing active/recent trees. Requires a registry (KV namespace or D1) since each tree is a separate DO.
 - [ ] **Share links** — `/t/:shortId` or similar short URLs for sharing. Optional expiry.
-- [ ] **Read-only mode** — viewer flag to disable input forwarding. Useful for public sharing where watchers shouldn't type.
+- [x] **Read-only mode** — now the default rather than a flag. Unauthenticated viewer input and resizes are dropped in the DO before they touch the PTY or the tree.
 - [ ] **Embed widget** — iframe-friendly viewer with configurable dimensions for embedding in docs or blogs.
 
 ## Phase 4: Session management
@@ -42,7 +44,7 @@ Lifecycle features for long-running or completed sessions.
 - [ ] **Session end** — explicit close event when sandbox disconnects. Mark tree as "ended" vs "live".
 - [ ] **Compaction** — collapse long runs of data entries between snapshots. Keep snapshots + labels + branches, discard intermediate data for old sessions.
 - [ ] **Export** — download a session as asciicast (asciinema format) or raw log. Enables portability.
-- [ ] **TTL / cleanup** — auto-expire trees after configurable duration. Prevent unbounded storage growth.
+- [ ] **TTL / cleanup** — auto-expire trees after a configurable duration, and a `DELETE /trees/:id` behind the bearer. **Next gap:** with writes gated but no lifecycle, every tree ever created is permanent, and a leaked link is permanent read access to a whole session.
 
 ## Phase 5: Multi-user & collaboration
 
