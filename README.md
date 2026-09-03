@@ -62,7 +62,7 @@ Three carriers, in the order the Worker prefers them:
 ### Running a sandbox
 
 ```sh
-source ~/.config/cloudcompute/terminalshare.env   # sets TERMINALSHARE_TOKEN
+source ~/.config/cloudcompute/terminalshare.env   # the file exports TERMINALSHARE_TOKEN
 cd sandbox && npm install
 npm start -- https://terminalshare.com
 ```
@@ -113,7 +113,8 @@ the account today — `terminalshare-preview` is configured in `wrangler.jsonc`
 but has never been deployed.
 
 Keep the value in `~/.config/cloudcompute/terminalshare.env` (mode 600) as
-`TERMINALSHARE_TOKEN=…` so the sandbox connector can source it.
+`export TERMINALSHARE_TOKEN=…` (with the `export`, so sourcing the file puts the
+value in the environment the connector inherits; a plain assignment would not).
 
 To roll back a deploy: `./node_modules/.bin/wrangler rollback --env production`.
 To revoke every outstanding token: put a fresh secret.
