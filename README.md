@@ -94,13 +94,23 @@ bun run test         # node --test against a real workerd via unstable_dev
 
 ## Deploy
 
+The wrangler OAuth login covers more than one Cloudflare account, so set
+`CLOUDFLARE_ACCOUNT_ID` before any non-interactive wrangler command or it will
+refuse to pick one. (Deliberately not in `wrangler.jsonc` — this repo is public.)
+
 ```sh
+export CLOUDFLARE_ACCOUNT_ID=...
+
 # once per environment
 openssl rand -base64 32 | ./node_modules/.bin/wrangler secret put SANDBOX_TOKEN --env production
 
-bun run deploy:preview
 bun run deploy:production
 ```
+
+Set the secret *before* deploying the code that reads it; otherwise every write
+returns 503 until the secret lands. Only `terminalshare` (production) exists on
+the account today — `terminalshare-preview` is configured in `wrangler.jsonc`
+but has never been deployed.
 
 Keep the value in `~/.config/cloudcompute/terminalshare.env` (mode 600) as
 `TERMINALSHARE_TOKEN=…` so the sandbox connector can source it.
