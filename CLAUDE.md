@@ -22,12 +22,15 @@ Persist and share terminal state as a tree. Each terminal session is a Durable O
 - `src/tree/tree.ts` — `SessionTree` class: append, branch, getTree, buildReplaySequence
 - `src/terminal-tree-do.ts` — `TerminalTreeDO` Durable Object: WebSocket relay + tree storage
 - `src/index.ts` — Hono routes: REST API + WebSocket upgrades
+- `src/auth.ts` — `SANDBOX_TOKEN` bearer gate: constant-time compare, and the three token carriers (header, `ts-token.` subprotocol, query)
+- `test/worker.test.ts` — write-gate tests against a real workerd (`node --test`, not `bun test`)
 
 ## Commands
 
 ```sh
 bun run dev          # wrangler dev
 bun run check        # tsc
+bun run test         # node --test (bun's fetch hangs against unstable_dev)
 bun run deploy:preview
 bun run deploy:production
 ```

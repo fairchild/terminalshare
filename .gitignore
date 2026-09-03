@@ -5,6 +5,8 @@ dist/
 # Secrets and credentials
 .env
 .env.*
+.dev.vars
+.dev.vars.*
 *.pem
 *.key
 *.p12
