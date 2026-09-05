@@ -6,6 +6,13 @@ import {
   socketToken,
   tokenSubprotocol,
 } from "./auth.ts";
+import { allowedOrigins } from "./cors.ts";
+import {
+  MAX_TTL_SECONDS,
+  MIN_TTL_SECONDS,
+  expiryFrom,
+  resolveTtlSeconds,
+} from "./ttl.ts";
 
 export { TerminalTreeDO } from "./terminal-tree-do.ts";
 
@@ -14,7 +21,23 @@ const GHOSTTY_WEB = "https://esm.sh/ghostty-web@0.4.0";
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.use("/*", cors());
+/**
+ * An unlisted origin gets `origin: ""`, which matches no real Origin header,
+ * so Hono emits no `Access-Control-Allow-Origin` at all and the browser blocks
+ * the read. `credentials` stays false — see `src/cors.ts` for why.
+ */
+app.use("/*", (c, next) => {
+  const requestOrigin = c.req.header("Origin");
+  const allowed =
+    requestOrigin !== undefined &&
+    allowedOrigins(c.env.ENVIRONMENT, c.env.ALLOWED_ORIGINS).has(requestOrigin);
+  return cors({
+    origin: allowed ? requestOrigin : "",
+    credentials: false,
+    allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+    allowHeaders: ["Authorization", "Content-Type"],
+  })(c, next);
+});
 
 app.get("/", async (c) => {
   const accept = c.req.header("accept") ?? "";
@@ -31,6 +54,7 @@ app.get("/", async (c) => {
         replay: "GET /trees/:id/replay/:nodeId",
         branch: "POST /trees/:id/branch",
         label: "POST /trees/:id/label",
+        deleteTree: "DELETE /trees/:id (bearer)",
         viewerWebSocket: "GET /trees/:id/ws",
         sandboxWebSocket: "GET /trees/:id/ws/sandbox (bearer)",
       },
@@ -77,7 +101,20 @@ app.post("/trees", async (c) => {
     cols?: number;
     rows?: number;
     name?: string;
+    ttlSeconds?: number;
   }>();
+
+  const ttlSeconds = resolveTtlSeconds(body.ttlSeconds);
+  if (ttlSeconds === null) {
+    return c.json(
+      {
+        error: "ttlSeconds must be a whole number of seconds within range",
+        min: MIN_TTL_SECONDS,
+        max: MAX_TTL_SECONDS,
+      },
+      400
+    );
+  }
 
   const treeId = crypto.randomUUID();
   const stub = c.env.TERMINAL_TREE.get(
@@ -92,6 +129,7 @@ app.post("/trees", async (c) => {
       cols: body.cols ?? 80,
       rows: body.rows ?? 24,
       name: body.name,
+      expiresAt: expiryFrom(new Date(), ttlSeconds),
     }),
   }));
 
@@ -99,60 +137,68 @@ app.post("/trees", async (c) => {
   return c.json({ treeId, ...header }, 201);
 });
 
+/**
+ * Withdraw a share. Requires the bearer — deleting is the most consequential
+ * write there is, and the tree UUID alone must not be enough to destroy it.
+ *
+ * Idempotent: a tree that is already gone still answers 204, so a retry is
+ * safe and the response does not reveal which tree ids exist.
+ */
+app.delete("/trees/:id", async (c) => {
+  const denied = await requireToken(c.env, bearerToken(c.req.raw));
+  if (denied) return denied;
+
+  const stub = getStub(c);
+  await stub.fetch(new Request("http://do/delete", { method: "POST" }));
+  return c.body(null, 204);
+});
+
 /** Get tree info */
 app.get("/trees/:id", async (c) => {
   const stub = getStub(c);
-  const res = await stub.fetch(new Request("http://do/info"));
-  return c.json(await res.json());
+  return forwardJson(await stub.fetch(new Request("http://do/info")));
 });
 
 /** Get full tree structure */
 app.get("/trees/:id/tree", async (c) => {
   const stub = getStub(c);
-  const res = await stub.fetch(new Request("http://do/tree"));
-  return c.json(await res.json());
+  return forwardJson(await stub.fetch(new Request("http://do/tree")));
 });
 
 /** Get a specific node */
 app.get("/trees/:id/node/:nodeId", async (c) => {
   const stub = getStub(c);
-  const nodeId = c.req.param("nodeId");
-  const res = await stub.fetch(new Request(`http://do/node?id=${nodeId}`));
-  if (res.status === 404) return c.json({ error: "not found" }, 404);
-  return c.json(await res.json());
+  const nodeId = encodeURIComponent(c.req.param("nodeId"));
+  return forwardJson(await stub.fetch(new Request(`http://do/node?id=${nodeId}`)));
 });
 
 /** Get replay sequence to reach a node */
 app.get("/trees/:id/replay/:nodeId", async (c) => {
   const stub = getStub(c);
-  const nodeId = c.req.param("nodeId");
-  const res = await stub.fetch(new Request(`http://do/replay?id=${nodeId}`));
-  return c.json(await res.json());
+  const nodeId = encodeURIComponent(c.req.param("nodeId"));
+  return forwardJson(await stub.fetch(new Request(`http://do/replay?id=${nodeId}`)));
 });
 
 /** Branch from a point in the tree */
 app.post("/trees/:id/branch", async (c) => {
   const stub = getStub(c);
   const body = await c.req.json();
-  const res = await stub.fetch(new Request("http://do/branch", {
+  return forwardJson(await stub.fetch(new Request("http://do/branch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  }));
-  if (res.status === 404) return c.json({ error: "entry not found" }, 404);
-  return c.json(await res.json());
+  })));
 });
 
 /** Add a label/bookmark */
 app.post("/trees/:id/label", async (c) => {
   const stub = getStub(c);
   const body = await c.req.json();
-  const res = await stub.fetch(new Request("http://do/label", {
+  return forwardJson(await stub.fetch(new Request("http://do/label", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  }));
-  return c.json(await res.json(), 201);
+  })));
 });
 
 // --- Viewer ---
@@ -204,6 +250,23 @@ app.get("/trees/:id/ws/sandbox", async (c) => {
 function getStub(c: { env: Env; req: { param: (k: string) => string } }) {
   const id = c.req.param("id");
   return c.env.TERMINAL_TREE.get(c.env.TERMINAL_TREE.idFromName(id));
+}
+
+/**
+ * Relay a Durable Object response, preserving its status.
+ *
+ * The DO answers non-2xx with plain text, so parsing every response as JSON
+ * turned a 404 into a 500 — which is what production did for any unknown tree
+ * id, and what it would now do for every expired or deleted one.
+ */
+async function forwardJson(res: Response): Promise<Response> {
+  if (!res.ok) {
+    return Response.json(
+      { error: (await res.text()) || "error" },
+      { status: res.status }
+    );
+  }
+  return Response.json(await res.json(), { status: res.status });
 }
 
 // --- Landing HTML ---
