@@ -23,6 +23,11 @@ export interface TreeHeader {
   rows: number;
   /** Optional label for the tree */
   name?: string;
+  /**
+   * ISO timestamp after which the tree is purged. Absent on trees created
+   * before TTL shipped — those never expire.
+   */
+  expiresAt?: string;
 }
 
 // --- Entry types ---

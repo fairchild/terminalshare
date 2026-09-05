@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { SessionTree, generateId } from "./tree/tree.ts";
 import type { TreeHeader, ViewerInfo } from "./tree/types.ts";
+import { isExpired } from "./ttl.ts";
 
 /** How many data entries between automatic snapshots */
 const SNAPSHOT_INTERVAL = 500;
@@ -40,6 +41,23 @@ export class TerminalTreeDO extends DurableObject {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // Expiry is enforced here, on every touch, rather than trusted to the
+    // alarm. The alarm reclaims storage for a tree nobody visits; this makes
+    // the answer correct the instant the deadline passes, so a late or
+    // retried alarm can never leave an expired tree readable.
+    await this.expireIfDue();
+
+    if (path === "/delete" && request.method === "POST") return this.handleDelete();
+    if (path === "/init" && request.method === "POST")
+      return this.handleInit(request);
+
+    // Everything below needs a tree that still exists. Answering these from an
+    // empty database would report a purged tree as an empty one — a 200 with
+    // no entries, which reads as "nothing happened here" rather than "gone".
+    if (!this.tree.getHeader()) {
+      return new Response("tree not found", { status: 404 });
+    }
+
     if (path === "/ws/sandbox") return this.handleSandboxUpgrade(request);
     if (path === "/ws/view") return this.handleViewerUpgrade(request);
     if (path === "/info") return this.handleInfo();
@@ -52,8 +70,6 @@ export class TerminalTreeDO extends DurableObject {
       return this.handleBranch(request);
     if (path === "/label" && request.method === "POST")
       return this.handleLabel(request);
-    if (path === "/init" && request.method === "POST")
-      return this.handleInit(request);
 
     return new Response("not found", { status: 404 });
   }
@@ -66,6 +82,7 @@ export class TerminalTreeDO extends DurableObject {
       cols: number;
       rows: number;
       name?: string;
+      expiresAt: string;
     };
 
     const existing = this.tree.getHeader();
@@ -79,9 +96,63 @@ export class TerminalTreeDO extends DurableObject {
       cols: body.cols,
       rows: body.rows,
       name: body.name,
+      expiresAt: body.expiresAt,
     };
     this.tree.setHeader(header);
+    await this.ctx.storage.setAlarm(Date.parse(body.expiresAt));
     return Response.json(header, { status: 201 });
+  }
+
+  // --- Expiry and deletion ---
+
+  /**
+   * Fires at `expiresAt`. Storage-level expiry rather than a sweeper: there is
+   * no index of trees anywhere to sweep — a tree is reachable only by naming
+   * its Durable Object — so an alarm the object holds against itself is the
+   * only mechanism that can reach every tree, including ones nobody visits.
+   */
+  async alarm(): Promise<void> {
+    await this.purge();
+  }
+
+  /** Purge if the share window has closed. No-op for a tree with no expiry. */
+  private async expireIfDue(): Promise<void> {
+    const header = this.tree.getHeader();
+    if (header && isExpired(header.expiresAt, Date.now())) {
+      await this.purge();
+    }
+  }
+
+  private async handleDelete(): Promise<Response> {
+    await this.purge();
+    return new Response(null, { status: 204 });
+  }
+
+  /**
+   * Drop every trace of the tree and hang up on everyone watching.
+   *
+   * `deleteAll()` is the only call that clears the internal metadata as well
+   * as the rows, and it is what lets the object cease to exist. This Worker's
+   * compatibility date (2025-04-01) predates the 2026-02-24 change that made
+   * `deleteAll()` also clear the alarm, so the alarm is deleted explicitly —
+   * without that, a purged tree keeps alarm metadata and never goes away.
+   */
+  private async purge(): Promise<void> {
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.close(1000, "tree no longer available");
+      } catch {
+        // Already closing; nothing to hang up.
+      }
+    }
+
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+
+    // deleteAll() drops the tables too, so the in-memory handle is stale.
+    // A fresh one observes an empty database and stays uninitialised, which
+    // keeps storage empty rather than writing the schema straight back.
+    this.tree = new SessionTree(this.ctx.storage.sql);
   }
 
   // --- WebSocket: sandbox connection ---
@@ -226,6 +297,7 @@ export class TerminalTreeDO extends DurableObject {
 
     return Response.json({
       ...header,
+      expiresAt: header.expiresAt ?? null,
       entryCount: this.tree.entryCount(),
       leafId: this.tree.leafId,
       viewers,

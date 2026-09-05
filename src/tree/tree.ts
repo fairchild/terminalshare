@@ -25,17 +25,46 @@ export function generateId(): EntryId {
 /**
  * Tree backed by SQLite in a Durable Object.
  * Append-only — entries are never modified or deleted.
+ *
+ * The schema is created on the first write, not in the constructor. Creating
+ * tables is itself a write, so an eager constructor would mean that merely
+ * reading an unknown tree id conjured a Durable Object that owns storage and
+ * therefore never ceases to exist — unauthenticated, and once per id anyone
+ * cares to guess. Deferring it also lets a purge leave genuinely empty
+ * storage behind, which is the condition for the object to be cleaned up.
  */
 export class SessionTree {
   private sql: SqlStorage;
   private _leafId: EntryId | null = null;
+  private ready = false;
 
   constructor(sql: SqlStorage) {
     this.sql = sql;
-    this.initSchema();
+    this.ready = this.schemaExists();
+    if (this.ready) this.loadLeaf();
   }
 
-  private initSchema() {
+  /** True once the tables exist — i.e. once something has been written. */
+  get initialized(): boolean {
+    return this.ready;
+  }
+
+  private schemaExists(): boolean {
+    const rows = [
+      ...this.sql.exec(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'header'"
+      ),
+    ];
+    return rows.length > 0;
+  }
+
+  private loadLeaf() {
+    const rows = [...this.sql.exec("SELECT value FROM meta WHERE key = 'leaf_id'")];
+    this._leafId = rows.length > 0 ? (rows[0].value as string) : null;
+  }
+
+  private ensureSchema() {
+    if (this.ready) return;
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS header (
         id TEXT PRIMARY KEY,
@@ -55,8 +84,8 @@ export class SessionTree {
         value TEXT NOT NULL
       );
     `);
-    const rows = [...this.sql.exec("SELECT value FROM meta WHERE key = 'leaf_id'")];
-    this._leafId = rows.length > 0 ? (rows[0].value as string) : null;
+    this.ready = true;
+    this.loadLeaf();
   }
 
   get leafId(): EntryId | null {
@@ -78,6 +107,7 @@ export class SessionTree {
   // --- Header ---
 
   setHeader(header: TreeHeader) {
+    this.ensureSchema();
     this.sql.exec(
       "INSERT OR REPLACE INTO header (id, data) VALUES (?, ?)",
       header.id,
@@ -86,6 +116,7 @@ export class SessionTree {
   }
 
   getHeader(): TreeHeader | null {
+    if (!this.ready) return null;
     const row = firstRow(this.sql.exec("SELECT data FROM header LIMIT 1"));
     return row ? JSON.parse(row.data as string) : null;
   }
@@ -93,6 +124,7 @@ export class SessionTree {
   // --- Append ---
 
   append(entry: NewEntry): TreeEntry {
+    this.ensureSchema();
     const id = generateId();
     const parentId = this._leafId;
     const timestamp = new Date().toISOString();
@@ -115,6 +147,7 @@ export class SessionTree {
 
   /** Move leaf to an earlier entry. Next append creates a sibling (new branch). */
   branch(toId: EntryId, summary?: string): TreeEntry | null {
+    if (!this.ready) return null;
     const exists = firstRow(this.sql.exec("SELECT id FROM entries WHERE id = ?", toId));
     if (!exists) return null;
 
@@ -133,6 +166,7 @@ export class SessionTree {
   // --- Read ---
 
   getEntry(id: EntryId): TreeEntry | null {
+    if (!this.ready) return null;
     const row = firstRow(this.sql.exec("SELECT data FROM entries WHERE id = ?", id));
     return row ? JSON.parse(row.data as string) : null;
   }
@@ -153,6 +187,7 @@ export class SessionTree {
 
   /** Get direct children of an entry. */
   getChildren(parentId: EntryId | null): TreeEntry[] {
+    if (!this.ready) return [];
     const rows = parentId
       ? this.sql.exec(
           "SELECT data FROM entries WHERE parent_id = ? ORDER BY timestamp",
@@ -166,6 +201,7 @@ export class SessionTree {
 
   /** Build full tree structure. */
   getTree(): TreeNode[] {
+    if (!this.ready) return [];
     const allRows = this.sql.exec(
       "SELECT data FROM entries ORDER BY timestamp"
     );
@@ -239,11 +275,13 @@ export class SessionTree {
   // --- Stats ---
 
   entryCount(): number {
+    if (!this.ready) return 0;
     const row = this.sql.exec("SELECT COUNT(*) as n FROM entries").one();
     return (row?.n as number) ?? 0;
   }
 
   entriesSinceLastSnapshot(): number {
+    if (!this.ready) return 0;
     const lastSnapshot = firstRow(
       this.sql.exec(
         "SELECT timestamp FROM entries WHERE type = 'snapshot' ORDER BY timestamp DESC LIMIT 1"

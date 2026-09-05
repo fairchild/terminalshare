@@ -350,3 +350,292 @@ describe("an unset SANDBOX_TOKEN fails closed", () => {
     }
   });
 });
+
+// --- TTL, deletion, and the CORS allowlist ---
+
+/** Create a tree with an explicit lifetime. */
+async function createTreeWithTtl(ttlSeconds: number): Promise<string> {
+  const res = await worker.fetch("/trees", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ sandboxUrl: "local", name: "ttl", ttlSeconds }),
+  });
+  assert.equal(res.status, 201);
+  return ((await res.json()) as { treeId: string }).treeId;
+}
+
+function closed(socket: Socket): Promise<number> {
+  return new Promise((resolve) => socket.ws.on("close", (code) => resolve(code)));
+}
+
+describe("an unknown tree is absent, not broken", () => {
+  test("GET /trees/:id 404s instead of failing to parse a text error as JSON", async () => {
+    const res = await worker.fetch("/trees/11111111-2222-3333-4444-555555555555");
+    assert.equal(res.status, 404);
+    assert.deepEqual(await res.json(), { error: "tree not found" });
+  });
+
+  test("the tree structure and viewer page agree that it is not there", async () => {
+    const id = "11111111-2222-3333-4444-666666666666";
+    assert.equal((await worker.fetch(`/trees/${id}/tree`)).status, 404);
+    assert.equal((await worker.fetch(`/trees/${id}/view`)).status, 404);
+    assert.equal(await handshakeStatus(`/trees/${id}/ws`), 404);
+  });
+});
+
+describe("a share does not live forever", () => {
+  test("a tree created without a ttl gets the 24h default", async () => {
+    const res = await worker.fetch("/trees", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ sandboxUrl: "local" }),
+    });
+    assert.equal(res.status, 201);
+    const { expiresAt } = (await res.json()) as { expiresAt: string };
+    const seconds = (Date.parse(expiresAt) - Date.now()) / 1000;
+    assert.ok(
+      seconds > 86_000 && seconds <= 86_400,
+      `default ttl should be ~24h, got ${seconds}s`
+    );
+  });
+
+  test("an explicit ttl is what the tree reports", async () => {
+    const treeId = await createTreeWithTtl(600);
+    const info = (await (await worker.fetch(`/trees/${treeId}`)).json()) as {
+      expiresAt: string;
+    };
+    const seconds = (Date.parse(info.expiresAt) - Date.now()) / 1000;
+    assert.ok(seconds > 550 && seconds <= 600, `expected ~600s, got ${seconds}s`);
+  });
+
+  test("a nonsense ttl is refused rather than quietly clamped", async () => {
+    for (const ttlSeconds of [0, -1, 1.5, 31 * 24 * 60 * 60, "an hour"]) {
+      const res = await worker.fetch("/trees", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ sandboxUrl: "local", ttlSeconds }),
+      });
+      assert.equal(res.status, 400, `ttlSeconds=${ttlSeconds} should be rejected`);
+    }
+  });
+
+  test("once the window closes the tree and its recorded keystrokes are gone", async () => {
+    const treeId = await createTreeWithTtl(1);
+    const sandbox = await open(`/trees/${treeId}/ws/sandbox`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    sandbox.ws.send("secret output");
+    await settle();
+
+    // Recorded while the share was live.
+    const live = (await (await worker.fetch(`/trees/${treeId}/tree`)).json()) as never;
+    assert.ok(flatten(live).length > 0, "the sandbox output should have been recorded");
+
+    await settle(1_500);
+
+    assert.equal((await worker.fetch(`/trees/${treeId}`)).status, 404);
+    assert.equal((await worker.fetch(`/trees/${treeId}/tree`)).status, 404);
+    assert.equal((await worker.fetch(`/trees/${treeId}/view`)).status, 404);
+    assert.equal(await handshakeStatus(`/trees/${treeId}/ws`), 404);
+    assert.equal(
+      await handshakeStatus(`/trees/${treeId}/ws/sandbox`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      }),
+      404,
+      "a reconnecting sandbox must not resurrect an expired tree"
+    );
+
+    sandbox.close();
+  });
+
+  test("expiry does not reach a tree that has not reached its deadline", async () => {
+    const shortLived = await createTreeWithTtl(1);
+    const longLived = await createTreeWithTtl(600);
+    await settle(1_500);
+
+    assert.equal((await worker.fetch(`/trees/${shortLived}`)).status, 404);
+    assert.equal(
+      (await worker.fetch(`/trees/${longLived}`)).status,
+      200,
+      "expiring one tree must not touch its neighbours"
+    );
+  });
+});
+
+describe("a share can be withdrawn deliberately", () => {
+  test("401 without the bearer — the link alone must not destroy the tree", async () => {
+    const treeId = await createTree();
+    const res = await worker.fetch(`/trees/${treeId}`, { method: "DELETE" });
+    assert.equal(res.status, 401);
+    assert.equal(
+      (await worker.fetch(`/trees/${treeId}`)).status,
+      200,
+      "the refused delete must not have taken effect"
+    );
+  });
+
+  test("401 with a wrong bearer of the same length", async () => {
+    const treeId = await createTree();
+    const res = await worker.fetch(`/trees/${treeId}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${WRONG}` },
+    });
+    assert.equal(res.status, 401);
+    assert.equal((await worker.fetch(`/trees/${treeId}`)).status, 200);
+  });
+
+  test("204 with the bearer, and the tree is gone afterwards", async () => {
+    const treeId = await createTree();
+    const res = await worker.fetch(`/trees/${treeId}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    assert.equal(res.status, 204);
+
+    assert.equal((await worker.fetch(`/trees/${treeId}`)).status, 404);
+    assert.equal((await worker.fetch(`/trees/${treeId}/tree`)).status, 404);
+    assert.equal(await handshakeStatus(`/trees/${treeId}/ws`), 404);
+  });
+
+  test("deleting is idempotent, so a retry is safe", async () => {
+    const treeId = await createTree();
+    for (const _ of [1, 2]) {
+      const res = await worker.fetch(`/trees/${treeId}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      assert.equal(res.status, 204);
+    }
+  });
+
+  test("viewers are hung up on rather than left watching a deleted tree", async () => {
+    const treeId = await createTree();
+    const viewer = await open(`/trees/${treeId}/ws`);
+    await settle();
+
+    const hungUp = closed(viewer);
+    await worker.fetch(`/trees/${treeId}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    assert.equal(await hungUp, 1000);
+  });
+
+  test("deleting one tree leaves its neighbours alone", async () => {
+    const doomed = await createTree();
+    const bystander = await createTree();
+
+    await worker.fetch(`/trees/${doomed}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+
+    assert.equal((await worker.fetch(`/trees/${doomed}`)).status, 404);
+    assert.equal((await worker.fetch(`/trees/${bystander}`)).status, 200);
+  });
+});
+
+describe("CORS is an allowlist, not a wildcard", () => {
+  let prod: Dev;
+
+  before(async () => {
+    prod = await startDev({ SANDBOX_TOKEN: TOKEN, ENVIRONMENT: "production" });
+  });
+
+  after(async () => {
+    await prod.stop();
+  });
+
+  test("a foreign origin gets no allow-origin header at all", async () => {
+    const res = await prod.fetch("/healthz", {
+      headers: { origin: "https://evil.example" },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("access-control-allow-origin"), null);
+  });
+
+  test("the wildcard is gone even when no origin is offered", async () => {
+    const res = await prod.fetch("/healthz");
+    assert.notEqual(res.headers.get("access-control-allow-origin"), "*");
+  });
+
+  // The dev proxy rewrites hostnames that appear in `routes` — a response
+  // saying `https://terminalshare.com` comes back as `https://placeholder`
+  // (or `https://localhost:<port>` under `wrangler dev`). The Worker still
+  // sees, and matches on, the real Origin: nothing is emitted at all unless
+  // the allowlist matched. So assert presence here and leave the exact-echo
+  // assertion to the ALLOWED_ORIGINS suite below, whose origins are not routed
+  // and so are not rewritten.
+  test("an allowlisted origin is granted, and the response varies on it", async () => {
+    for (const origin of ["https://terminalshare.com", "https://www.terminalshare.com"]) {
+      const res = await prod.fetch("/healthz", { headers: { origin } });
+      const allow = res.headers.get("access-control-allow-origin");
+      assert.notEqual(allow, null, `${origin} should be allowed`);
+      assert.notEqual(allow, "*", "the wildcard must not come back");
+      assert.match(res.headers.get("vary") ?? "", /Origin/i);
+    }
+  });
+
+  test("a preflight from a foreign origin is not granted", async () => {
+    const res = await prod.fetch("/trees", {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://evil.example",
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "authorization,content-type",
+      },
+    });
+    assert.equal(res.headers.get("access-control-allow-origin"), null);
+  });
+
+  test("credentials are never advertised — there is no cookie to send", async () => {
+    for (const origin of ["https://terminalshare.com", "https://evil.example"]) {
+      const res = await prod.fetch("/healthz", { headers: { origin } });
+      assert.equal(res.headers.get("access-control-allow-credentials"), null);
+    }
+  });
+
+  test("a look-alike origin does not match by prefix or suffix", async () => {
+    for (const origin of [
+      "https://terminalshare.com.evil.example",
+      "https://evilterminalshare.com",
+      "http://terminalshare.com",
+    ]) {
+      const res = await prod.fetch("/healthz", { headers: { origin } });
+      assert.equal(
+        res.headers.get("access-control-allow-origin"),
+        null,
+        `${origin} must not be allowed`
+      );
+    }
+  });
+});
+
+describe("ALLOWED_ORIGINS names the origins an unnamed environment cannot", () => {
+  test("the configured list replaces the built-in one", async () => {
+    const configured = await startDev({
+      SANDBOX_TOKEN: TOKEN,
+      ENVIRONMENT: "preview",
+      ALLOWED_ORIGINS: "https://preview.example, https://other.example",
+    });
+    try {
+      const allowed = await configured.fetch("/healthz", {
+        headers: { origin: "https://preview.example" },
+      });
+      assert.equal(
+        allowed.headers.get("access-control-allow-origin"),
+        "https://preview.example"
+      );
+
+      // Not merely absent from the configured list — this is the origin the
+      // built-in production set would have allowed, so it proves the override
+      // replaces the defaults rather than adding to them.
+      const refused = await configured.fetch("/healthz", {
+        headers: { origin: "https://terminalshare.com" },
+      });
+      assert.equal(refused.headers.get("access-control-allow-origin"), null);
+    } finally {
+      await configured.stop();
+    }
+  });
+});
